@@ -15,6 +15,7 @@ class User(Base):
     email = Column(String(120), unique=True, nullable=False, index=True)
     full_name = Column(String(100), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     wallet = relationship("Wallet", back_populates="user", uselist=False, cascade="all, delete-orphan")

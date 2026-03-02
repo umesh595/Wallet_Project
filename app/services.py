@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError, IntegrityError, DBAPIError
 from app.database import AsyncSession
 from app.models import User, Wallet, Transaction
 from app.logging_config import logger
-
+from app.auth import get_password_hash, verify_password
 class InsufficientFundsError(Exception):
     pass
 class WalletNotFoundError(Exception):
@@ -28,7 +28,7 @@ LOCK_TIMEOUT_MS = 5000
 MAX_DEADLOCK_RETRIES = 3
 DEADLOCK_RETRY_DELAY_MS = 50
 
-async def create_user_service(session: AsyncSession, username: str, email: str, full_name: Optional[str] = None) -> User:
+async def create_user_service(session: AsyncSession, username: str, email: str, full_name: Optional[str] = None, password: Optional[str] = None) -> User:
     result = await session.execute(
         select(User).where(
             (User.username == username) | (User.email == email)
@@ -41,11 +41,36 @@ async def create_user_service(session: AsyncSession, username: str, email: str, 
             extra={"username": username, "email": email, "existing_id": str(existing.id)}
         )
         raise UserAlreadyExistsError("User with username '{}' or email '{}' already exists".format(username, email))
-    user = User(username=username, email=email, full_name=full_name, is_active=True)
+    if password is None:
+        raise ValueError("Password is required for user creation")
+    user = User(username=username, email=email, full_name=full_name, is_active=True, hashed_password=get_password_hash(password))
     session.add(user)
     await session.commit()
     await session.refresh(user)
     logger.info("User created successfully", extra={"user_id": str(user.id), "username": user.username})
+    return user
+
+async def authenticate_user_service(session: AsyncSession, username: str, password: str) -> Optional[User]:
+    """
+    Authenticate user by username + password.
+    Returns User if valid, None otherwise.
+    """
+    result = await session.execute(
+        select(User).where(
+            (User.username == username) | (User.email == username),
+            User.is_active == True
+        )
+    )
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        logger.warning("Authentication failed - user not found", extra={"username": username})
+        return None
+    
+    if not verify_password(password, user.hashed_password):
+        logger.warning("Authentication failed - invalid password", extra={"username": username})
+        return None
+    logger.info("User authenticated successfully", extra={"user_id": str(user.id), "username": user.username})
     return user
 
 async def get_user_by_username_service(session: AsyncSession, username: str) -> User:

@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     APP_NAME: str
     DB_LOCK_TIMEOUT: int = 5
     DB_MAX_DEADLOCK_RETRIES: int = 3
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
