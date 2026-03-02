@@ -136,7 +136,6 @@ async def _execute_with_retry(operation_name: str, func, *args, **kwargs):
                 continue
             raise
         except LockTimeoutError:
-
             raise
     logger.error(
         "Retry limit exceeded for {}".format(operation_name),
