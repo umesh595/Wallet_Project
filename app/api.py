@@ -1,5 +1,5 @@
 # app/api.py
-from fastapi import APIRouter, Depends, HTTPException, status, Security
+from fastapi import APIRouter, Depends, HTTPException, status, Security, Body
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
@@ -29,7 +29,7 @@ from app.schemas import (
 )
 from app.auth import (
     create_access_token,
-    get_current_user_with_session,  # ✅ Combined dependency
+    get_current_user_with_session,
     http_bearer,
 )
 from app.logging_config import logger
@@ -47,7 +47,7 @@ INVALID_CREDENTIALS = "Invalid username or password"
 # ============ PUBLIC ENDPOINTS ============
 @router.post("/auth/login", response_model=Token)
 async def login(
-    credentials: UserLogin,  # ✅ Variable name: credentials
+    credentials: UserLogin = Body(...),  # ✅ JSON body: {"username": "...", "password": "..."}
     session: AsyncSession = Depends(get_db_session)
 ):
     """🔓 PUBLIC: Authenticate and issue JWT token"""
@@ -72,28 +72,28 @@ async def login(
 
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
-     UserCreate,  # ✅ FIXED: Added variable name 'data'
+    data: UserCreate = Body(...),
     session: AsyncSession = Depends(get_db_session)
 ):
-    """🔓 PUBLIC: Register a new user"""
     try:
         user = await create_user_service(
-            session,
+            session=session,
             username=data.username,
             email=data.email,
             full_name=data.full_name,
             password=data.password
         )
-        logger.info("User registered successfully", extra={"user_id": str(user.id), "username": user.username})
+        logger.info("User registered successfully", extra={"user_id": str(user.id)})
         return UserResponse.model_validate(user)
-    except UserAlreadyExistsError as e:
-        logger.warning("Registration failed - user exists", extra={"error": str(e)})
+
+    except UserAlreadyExistsError:
         raise HTTPException(status_code=409, detail=USER_ALREADY_EXISTS)
+
     except IntegrityError:
-        logger.error("Database integrity error during registration")
         raise HTTPException(status_code=500, detail=DATABASE_ERROR)
+
     except Exception as e:
-        logger.error("Unexpected registration error: {}".format(str(e)))
+        logger.error(f"Unexpected registration error: {str(e)}")
         raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
 
 @router.get("/users/{username}", response_model=UserResponse)
@@ -111,114 +111,111 @@ async def get_user(
 # ============ PROTECTED ENDPOINTS ============
 @router.post("/wallet", response_model=WalletResponse, status_code=status.HTTP_201_CREATED)
 async def create_wallet(
-    current_user: User = Depends(get_current_user_with_session),  # ✅ Single session
+    current_user: User = Depends(get_current_user_with_session),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """🔐 PROTECTED: Create wallet for authenticated user"""
     try:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            wallet = await create_wallet_for_user_service(session, current_user.id)
-            return WalletResponse(
-                wallet_id=wallet.id,
-                user_id=wallet.user_id,
-                username=current_user.username,
-                balance=wallet.balance,
-                created_at=wallet.created_at
-            )
+        wallet = await create_wallet_for_user_service(session, current_user.id)
+
+        return WalletResponse(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            username=current_user.username,
+            balance=wallet.balance,
+            created_at=wallet.created_at,
+        )
+
     except IntegrityError:
-        logger.error("Database error creating wallet", extra={"user_id": str(current_user.id)})
-        raise HTTPException(status_code=500, detail=DATABASE_ERROR)
+        raise HTTPException(status_code=500, detail="Database error")
+
     except Exception as e:
-        logger.error("Wallet creation failed: {}".format(str(e)), extra={"user_id": str(current_user.id)})
-        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/wallet/credit", response_model=WalletResponse)
 async def credit_money(
-     TransactionRequest,  # ✅ FIXED: Added variable name 'data'
-    current_user: User = Depends(get_current_user_with_session),  # ✅ Single session
+    data: TransactionRequest = Body(...),
+    current_user: User = Depends(get_current_user_with_session),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """🔐 PROTECTED: Credit money to authenticated user's wallet"""
     try:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            wallet = await credit_wallet_service(session, current_user.id, data.amount)
-            return WalletResponse(
-                wallet_id=wallet.id,
-                user_id=wallet.user_id,
-                username=current_user.username,
-                balance=wallet.balance,
-                created_at=wallet.created_at
-            )
-    except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
-    except Exception as e:
-        logger.error("Credit failed: {}".format(str(e)), extra={"user_id": str(current_user.id), "amount": str(data.amount)})
-        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
-    except LockTimeoutError:
-        logger.warning("Credit failed - lock timeout", extra={"user_id": str(current_user.id)})
-        raise HTTPException(status_code=409, detail="Wallet temporarily locked, please retry")
+        wallet = await credit_wallet_service(session, current_user.id, data.amount)
 
+        return WalletResponse(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            username=current_user.username,
+            balance=wallet.balance,
+            created_at=wallet.created_at,
+        )
+
+    except WalletNotFoundError:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @router.post("/wallet/debit", response_model=WalletResponse)
 async def debit_money(
-     TransactionRequest,  # ✅ FIXED: Added variable name 'data'
-    current_user: User = Depends(get_current_user_with_session),  # ✅ Single session
+    data: TransactionRequest = Body(...),
+    current_user: User = Depends(get_current_user_with_session),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """🔐 PROTECTED: Debit money from authenticated user's wallet"""
     try:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            wallet = await debit_wallet_service(session, current_user.id, data.amount)
-            return WalletResponse(
-                wallet_id=wallet.id,
-                user_id=wallet.user_id,
-                username=current_user.username,
-                balance=wallet.balance,
-                created_at=wallet.created_at
-            )
+        wallet = await debit_wallet_service(session, current_user.id, data.amount)
+
+        return WalletResponse(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            username=current_user.username,
+            balance=wallet.balance,
+            created_at=wallet.created_at
+        )
+
     except WalletNotFoundError:
         raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+
     except InsufficientFundsError as e:
-        logger.warning("Debit failed - insufficient funds", extra={"user_id": str(current_user.id), "error": str(e)})
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Debit failed: {}".format(str(e)), extra={"user_id": str(current_user.id), "amount": str(data.amount)})
-        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
+
     except LockTimeoutError:
-        logger.warning("Debit failed - lock timeout", extra={"user_id": str(current_user.id)})
-        raise HTTPException(status_code=409, detail="Wallet temporarily locked, please retry")
+        raise HTTPException(status_code=409, detail="Wallet temporarily locked, retry")
+
+    except Exception as e:
+        logger.error(f"Debit failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
 
 @router.get("/wallet/balance", response_model=WalletResponse)
 async def get_balance(
-    current_user: User = Depends(get_current_user_with_session),  # ✅ Single session
+    current_user: User = Depends(get_current_user_with_session),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """🔐 PROTECTED: Get authenticated user's wallet balance"""
     try:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            wallet, user = await get_wallet_by_user_id_service(session, current_user.id)
-            return WalletResponse(
-                wallet_id=wallet.id,
-                user_id=wallet.user_id,
-                username=user.username,
-                balance=wallet.balance,
-                created_at=wallet.created_at
-            )
+        wallet, user = await get_wallet_by_user_id_service(session, current_user.id)
+
+        return WalletResponse(
+            wallet_id=wallet.id,
+            user_id=wallet.user_id,
+            username=user.username,
+            balance=wallet.balance,
+            created_at=wallet.created_at,
+        )
+
     except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Wallet not found")
 
 @router.get("/wallet/ledger", response_model=LedgerResponse)
 async def get_history(
-    current_user: User = Depends(get_current_user_with_session),  # ✅ Single session
+    current_user: User = Depends(get_current_user_with_session),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """🔐 PROTECTED: Get authenticated user's transaction history"""
     try:
-        from app.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            transactions, balance, username = await get_ledger_service(session, current_user.id)
-            return LedgerResponse(
-                transactions=transactions,
-                current_balance=balance,
-                username=username
-            )
+        transactions, balance, username = await get_ledger_service(session, current_user.id)
+
+        return LedgerResponse(
+            transactions=transactions,
+            current_balance=balance,
+            username=username,
+        )
+
     except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+        raise HTTPException(status_code=404, detail="Wallet not found")

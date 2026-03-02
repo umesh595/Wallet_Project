@@ -169,69 +169,78 @@ async def _execute_with_retry(operation_name: str, func, *args, **kwargs):
     raise DeadlockRetryError("Failed after {} retries: {}".format(MAX_DEADLOCK_RETRIES, last_error))
 
 async def _do_credit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
-    """Internal: Core credit logic (called within retry wrapper)"""
-    async with session.begin():
-        wallet, user = await _get_wallet_with_lock(session, user_id)
-        wallet.balance += amount
-        ledger_entry = Transaction(
-            wallet_id=wallet.id,
-            amount=amount,
-            transaction_type="CREDIT",
-            balance_after=wallet.balance,
-        )
-        session.add(ledger_entry)
-        await session.flush()
-        logger.info(
-            "Wallet credited successfully",
-            extra={
-                "wallet_id": wallet.id,
-                "user_id": str(user_id),
-                "username": user.username,
-                "amount": str(amount),
-                "new_balance": str(wallet.balance),
-                "locked": True,
-            },
-        )
-        return wallet
+    wallet, user = await _get_wallet_with_lock(session, user_id)
+
+    wallet.balance += amount
+
+    ledger_entry = Transaction(
+        wallet_id=wallet.id,
+        amount=amount,
+        transaction_type="CREDIT",
+        balance_after=wallet.balance,
+    )
+
+    session.add(ledger_entry)
+    await session.flush()
+
+    logger.info(
+        "Wallet credited successfully",
+        extra={
+            "wallet_id": wallet.id,
+            "user_id": str(user_id),
+            "username": user.username,
+            "amount": str(amount),
+            "new_balance": str(wallet.balance),
+            "locked": True,
+        },
+    )
+
+    return wallet
 
 async def _do_debit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
-    """Internal: Core debit logic (called within retry wrapper)"""
-    async with session.begin():
-        wallet, user = await _get_wallet_with_lock(session, user_id)
-        if wallet.balance < amount:
-            logger.warning(
-                "Insufficient funds for debit",
-                extra={
-                    "wallet_id": wallet.id,
-                    "user_id": str(user_id),
-                    "username": user.username,
-                    "requested": str(amount),
-                    "available": str(wallet.balance),
-                    "locked": True,
-                },
-            )
-            raise InsufficientFundsError("Insufficient funds. Balance: {}, Requested: {}".format(wallet.balance, amount))
-        wallet.balance -= amount
-        ledger_entry = Transaction(
-            wallet_id=wallet.id,
-            amount=amount,
-            transaction_type="DEBIT",
-            balance_after=wallet.balance,
-        )
-        session.add(ledger_entry)
-        await session.flush()
-        logger.info(
-            "Wallet debited successfully",
+    wallet, user = await _get_wallet_with_lock(session, user_id)
+
+    if wallet.balance < amount:
+        logger.warning(
+            "Insufficient funds for debit",
             extra={
                 "wallet_id": wallet.id,
                 "user_id": str(user_id),
                 "username": user.username,
-                "amount": str(amount),
-                "new_balance": str(wallet.balance),
+                "requested": str(amount),
+                "available": str(wallet.balance),
                 "locked": True,
             },
         )
-        return wallet
+        raise InsufficientFundsError(
+            "Insufficient funds. Balance: {}, Requested: {}".format(wallet.balance, amount)
+        )
+
+    wallet.balance -= amount
+
+    ledger_entry = Transaction(
+        wallet_id=wallet.id,
+        amount=amount,
+        transaction_type="DEBIT",
+        balance_after=wallet.balance,
+    )
+
+    session.add(ledger_entry)
+    await session.flush()
+
+    logger.info(
+        "Wallet debited successfully",
+        extra={
+            "wallet_id": wallet.id,
+            "user_id": str(user_id),
+            "username": user.username,
+            "amount": str(amount),
+            "new_balance": str(wallet.balance),
+            "locked": True,
+        },
+    )
+
+    return wallet
 
 async def credit_wallet_service(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
     """Credit with retry logic for concurrency safety"""
