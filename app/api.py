@@ -14,6 +14,7 @@ from app.services import (
     debit_wallet_service,
     get_ledger_service,
     get_wallet_by_user_id_service,
+    LockTimeoutError,
     InsufficientFundsError,
     WalletNotFoundError,
 )
@@ -125,6 +126,9 @@ async def credit_money(
             extra={"user_id": str(user_id), "amount": str(data.amount)}
         )
         raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
+    except LockTimeoutError:
+        logger.warning("Credit failed - lock timeout", extra={"user_id": str(user_id)})
+        raise HTTPException(status_code=409, detail="Wallet temporarily locked, please retry")
 
 @router.post("/wallet/debit", response_model=WalletResponse)
 async def debit_money(
@@ -159,6 +163,9 @@ async def debit_money(
             extra={"user_id": str(user_id), "amount": str(data.amount)}
         )
         raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
+    except LockTimeoutError:
+       logger.warning("Debit failed - lock timeout", extra={"user_id": str(user_id)})
+       raise HTTPException(status_code=409, detail="Wallet temporarily locked, please retry")
 
 @router.get("/wallet/balance", response_model=WalletResponse)
 async def get_balance(
