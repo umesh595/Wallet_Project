@@ -1,4 +1,3 @@
-# app/schemas.py
 import uuid
 from pydantic import BaseModel, Field, EmailStr, ConfigDict
 from decimal import Decimal
@@ -10,14 +9,14 @@ class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-zA-Z0-9_]+$")
     email: EmailStr
     full_name: Optional[str] = Field(None, max_length=100)
-    password: str = Field(..., min_length=8, description="Password for authentication")  # ✅ ADDED
+    password: str = Field(..., min_length=8, description="Password for authentication") 
     
     model_config = ConfigDict(json_schema_extra={
         "example": {
             "username": "umesh",
             "email": "umesh@test.com",
-            "full_name": "Umesh Kumar",
-            "password": "SecurePass123!"
+            "full_name": "Umesh",
+            "password": "password1"
         }
     })
 
@@ -60,7 +59,7 @@ class UserLogin(BaseModel):
     """Login request schema - JSON body"""
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8)
-    model_config = ConfigDict(json_schema_extra={"example": {"username": "umesh", "password": "SecurePass123!"}})
+    model_config = ConfigDict(json_schema_extra={"example": {"username": "umesh", "password": "password1"}})
 
 class Token(BaseModel):
     """JWT token response"""

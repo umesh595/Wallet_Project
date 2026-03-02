@@ -7,7 +7,7 @@ import json
 from decimal import Decimal
 
 BASE_URL = "http://localhost:8000/api/v1"
-TEST_USERNAME = "umesh3"
+TEST_USERNAME = "umesh5"
 TEST_PASSWORD = "SecurePass123!"
 USER_ID = None
 ACCESS_TOKEN = None

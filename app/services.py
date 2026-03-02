@@ -23,7 +23,6 @@ class DeadlockRetryError(Exception):
     """Raised when deadlock retry limit exceeded"""
     pass
 
-# Production config
 LOCK_TIMEOUT_MS = 5000
 MAX_DEADLOCK_RETRIES = 3
 DEADLOCK_RETRY_DELAY_MS = 50
@@ -34,7 +33,7 @@ async def create_user_service(session: AsyncSession, username: str, email: str, 
             (User.username == username) | (User.email == email)
         )
     )
-    existing = result.scalar_one_or_none()
+    existing = result.scalars().first()
     if existing:
         logger.warning(
             "User creation failed - already exists",
@@ -61,12 +60,11 @@ async def authenticate_user_service(session: AsyncSession, username: str, passwo
             User.is_active == True
         )
     )
-    user = result.scalar_one_or_none()
+    user = result.scalars().first()
     
     if not user:
         logger.warning("Authentication failed - user not found", extra={"username": username})
         return None
-    
     if not verify_password(password, user.hashed_password):
         logger.warning("Authentication failed - invalid password", extra={"username": username})
         return None
@@ -106,8 +104,6 @@ async def create_wallet_for_user_service(session: AsyncSession, user_id: uuid.UU
 async def _get_wallet_with_lock(session: AsyncSession, user_id: uuid.UUID) -> Tuple[Wallet, User]:
     """Get wallet + user with row-level lock. Lock timeout set at DB connection level."""
     user = await get_user_by_id_service(session, user_id)
-    
-    # 🔒 Row-level lock — timeout handled by DB connection config
     result = await session.execute(
         select(Wallet)
         .where(Wallet.user_id == user_id)
@@ -134,55 +130,56 @@ async def get_wallet_by_user_id_service(session: AsyncSession, user_id: uuid.UUI
         raise WalletNotFoundError("No wallet found for user ID: {}".format(user_id))
     return wallet, user
 
+def _is_retryable_error(error: Exception) -> bool:
+    error_str = str(error).lower()
+    retry_codes = ["40p01", "40001", "55p03"]
+    retry_keywords = ["deadlock", "lock_timeout"]
+    return (
+        any(code in error_str for code in retry_codes)
+        or any(word in error_str for word in retry_keywords)
+    )
+
 async def _execute_with_retry(operation_name: str, func, *args, **kwargs):
-    """
-    Execute async function with retry logic for:
-    - Deadlocks (40P01)
-    - Lock timeouts (55P03)
-    - Serialization failures (40001)
-    """
     last_error = None
+    session = args[0]  
     for attempt in range(MAX_DEADLOCK_RETRIES):
         try:
             return await func(*args, **kwargs)
         except (OperationalError, DBAPIError) as e:
-            error_str = str(e).lower()
-            if "40p01" in error_str or "40001" in error_str or "deadlock" in error_str or "lock_timeout" in error_str or "55p03" in error_str:
-                last_error = e
-                retry_delay = DEADLOCK_RETRY_DELAY_MS * (attempt + 1) / 1000.0
-                logger.warning(
-                    "{} detected during {}, retrying in {}s (attempt {}/{})".format(
-                        "Deadlock/lock timeout" if "deadlock" in error_str or "55p03" in error_str else "Serialization failure",
-                        operation_name, retry_delay, attempt + 1, MAX_DEADLOCK_RETRIES
-                    ),
-                    extra={"error": str(e), "attempt": attempt + 1, "operation": operation_name, "error_code": getattr(e.orig, 'pgcode', None) if hasattr(e, 'orig') else None}
-                )
-                await asyncio.sleep(retry_delay)
-                continue
-            raise
-        except LockTimeoutError:
-            raise
+            if not _is_retryable_error(e):
+                raise
+            last_error = e
+            await session.rollback()  
+            retry_delay = DEADLOCK_RETRY_DELAY_MS * (attempt + 1) / 1000.0
+            logger.warning(
+                "Retryable DB error during %s, retrying in %ss (attempt %s/%s)",
+                operation_name,
+                retry_delay,
+                attempt + 1,
+                MAX_DEADLOCK_RETRIES,
+                extra={"error": str(e)}
+            )
+            await asyncio.sleep(retry_delay)
     logger.error(
-        "Retry limit exceeded for {}".format(operation_name),
-        extra={"error": str(last_error), "operation": operation_name}
+        "Retry limit exceeded for %s",
+        operation_name,
+        extra={"error": str(last_error)}
     )
-    raise DeadlockRetryError("Failed after {} retries: {}".format(MAX_DEADLOCK_RETRIES, last_error))
+    raise DeadlockRetryError(
+        f"Failed after {MAX_DEADLOCK_RETRIES} retries: {last_error}"
+    )
 
 async def _do_credit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
     wallet, user = await _get_wallet_with_lock(session, user_id)
-
     wallet.balance += amount
-
     ledger_entry = Transaction(
         wallet_id=wallet.id,
         amount=amount,
         transaction_type="CREDIT",
         balance_after=wallet.balance,
     )
-
     session.add(ledger_entry)
     await session.flush()
-
     logger.info(
         "Wallet credited successfully",
         extra={
@@ -194,12 +191,10 @@ async def _do_credit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: D
             "locked": True,
         },
     )
-
     return wallet
 
 async def _do_debit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:
     wallet, user = await _get_wallet_with_lock(session, user_id)
-
     if wallet.balance < amount:
         logger.warning(
             "Insufficient funds for debit",
@@ -215,19 +210,15 @@ async def _do_debit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: De
         raise InsufficientFundsError(
             "Insufficient funds. Balance: {}, Requested: {}".format(wallet.balance, amount)
         )
-
     wallet.balance -= amount
-
     ledger_entry = Transaction(
         wallet_id=wallet.id,
         amount=amount,
         transaction_type="DEBIT",
         balance_after=wallet.balance,
     )
-
     session.add(ledger_entry)
     await session.flush()
-
     logger.info(
         "Wallet debited successfully",
         extra={
@@ -239,7 +230,6 @@ async def _do_debit_wallet(session: AsyncSession, user_id: uuid.UUID, amount: De
             "locked": True,
         },
     )
-
     return wallet
 
 async def credit_wallet_service(session: AsyncSession, user_id: uuid.UUID, amount: Decimal) -> Wallet:

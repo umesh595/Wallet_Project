@@ -1,4 +1,3 @@
-# app/auth.py
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -8,9 +7,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import uuid
-
 from app.config import settings
-from app.database import get_db_session  # ✅ ADDED: Import get_db_session
+from app.database import get_db_session
 from app.models import User
 from app.logging_config import logger
 
@@ -33,11 +31,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 async def get_current_user_with_session(
     credentials: HTTPAuthorizationCredentials = Security(http_bearer),
-    session: AsyncSession = Depends(get_db_session)  # ✅ Now works - get_db_session is imported
+    session: AsyncSession = Depends(get_db_session)  
 ) -> User:
     """
     Combined dependency: Validates JWT AND fetches user from DB using endpoint's session.
-    ✅ This prevents double-session conflict.
+     This prevents double-session conflict.
     """
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise HTTPException(
@@ -45,14 +43,12 @@ async def get_current_user_with_session(
             detail="Invalid or missing authentication token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
     token = credentials.credentials
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         user_id: str = payload.get("sub")
@@ -61,16 +57,13 @@ async def get_current_user_with_session(
     except JWTError as e:
         logger.warning("JWT decode failed", extra={"error": str(e)})
         raise credentials_exception
-    
     try:
         user_uuid = uuid.UUID(user_id)
     except ValueError:
         logger.warning("Invalid user_id format in token", extra={"user_id": user_id})
         raise credentials_exception
-    
     result = await session.execute(select(User).where(User.id == user_uuid, User.is_active == True))
     user = result.scalar_one_or_none()
-    
     if user is None:
         logger.warning("User not found for token", extra={"user_id": str(user_uuid)})
         raise HTTPException(
@@ -78,7 +71,6 @@ async def get_current_user_with_session(
             detail="User not found or inactive",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
     return user
 
 def authorize_wallet_access(current_user: User, requested_user_id: uuid.UUID) -> bool:

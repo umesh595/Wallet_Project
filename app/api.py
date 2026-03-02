@@ -1,18 +1,16 @@
-# app/api.py
-from fastapi import APIRouter, Depends, HTTPException, status, Security, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
-import uuid
 
 from app.database import get_db_session
 from app.models import User
 from app.services import (
     create_user_service,
     get_user_by_username_service,
-    get_user_by_id_service,
     authenticate_user_service,
     UserAlreadyExistsError,
+    DeadlockRetryError,
     UserNotFoundError,
     create_wallet_for_user_service,
     credit_wallet_service,
@@ -40,17 +38,16 @@ router = APIRouter(prefix="/api/v1", tags=["Wallet & Users"])
 USER_NOT_FOUND = "User not found"
 USER_ALREADY_EXISTS = "User already exists"
 WALLET_NOT_FOUND = "Wallet not found"
-DATABASE_ERROR = "Database error"
+INTERNAL_SERVER_ERROR = "Internal Server Error"
 TRANSACTION_FAILED = "Transaction failed"
+DATABASE_ERROR="database error"
 INVALID_CREDENTIALS = "Invalid username or password"
 
-# ============ PUBLIC ENDPOINTS ============
 @router.post("/auth/login", response_model=Token)
 async def login(
-    credentials: UserLogin = Body(...),  # ✅ JSON body: {"username": "...", "password": "..."}
+    credentials: UserLogin = Body(...),  
     session: AsyncSession = Depends(get_db_session)
 ):
-    """🔓 PUBLIC: Authenticate and issue JWT token"""
     user = await authenticate_user_service(session, credentials.username, credentials.password)
     if not user:
         logger.warning("Login failed - invalid credentials", extra={"username": credentials.username})
@@ -86,29 +83,24 @@ async def register_user(
         logger.info("User registered successfully", extra={"user_id": str(user.id)})
         return UserResponse.model_validate(user)
 
-    except UserAlreadyExistsError:
-        raise HTTPException(status_code=409, detail=USER_ALREADY_EXISTS)
-
-    except IntegrityError:
-        raise HTTPException(status_code=500, detail=DATABASE_ERROR)
+    except (UserAlreadyExistsError, IntegrityError):
+         raise HTTPException(status_code=409, detail=USER_ALREADY_EXISTS)
 
     except Exception as e:
-        logger.error(f"Unexpected registration error: {str(e)}")
-        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
-
+        logger.exception("Unexpected registration error")
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @router.get("/users/{username}", response_model=UserResponse)
 async def get_user(
     username: str,
     session: AsyncSession = Depends(get_db_session)
 ):
-    """🔓 PUBLIC: Get user details by username"""
     try:
         user = await get_user_by_username_service(session, username)
         return UserResponse.model_validate(user)
     except UserNotFoundError:
         raise HTTPException(status_code=404, detail=USER_NOT_FOUND)
 
-# ============ PROTECTED ENDPOINTS ============
 @router.post("/wallet", response_model=WalletResponse, status_code=status.HTTP_201_CREATED)
 async def create_wallet(
     current_user: User = Depends(get_current_user_with_session),
@@ -116,7 +108,6 @@ async def create_wallet(
 ):
     try:
         wallet = await create_wallet_for_user_service(session, current_user.id)
-
         return WalletResponse(
             wallet_id=wallet.id,
             user_id=wallet.user_id,
@@ -124,12 +115,12 @@ async def create_wallet(
             balance=wallet.balance,
             created_at=wallet.created_at,
         )
-
     except IntegrityError:
-        raise HTTPException(status_code=500, detail="Database error")
-
+        logger.error("Wallet creation integrity error", extra={"user_id": str(current_user.id)})
+        raise HTTPException(status_code=409, detail="Wallet already exists")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected wallet creation error: {str(e)}", extra={"user_id": str(current_user.id)})
+        raise HTTPException(status_code=500, detail=DATABASE_ERROR)
 
 @router.post("/wallet/credit", response_model=WalletResponse)
 async def credit_money(
@@ -140,6 +131,8 @@ async def credit_money(
     try:
         wallet = await credit_wallet_service(session, current_user.id, data.amount)
 
+        await session.commit()
+
         return WalletResponse(
             wallet_id=wallet.id,
             user_id=wallet.user_id,
@@ -149,10 +142,14 @@ async def credit_money(
         )
 
     except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail="Wallet not found")
+        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+
+    except DeadlockRetryError:
+        raise HTTPException(status_code=409, detail="Transaction retry limit exceeded")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Credit failed: {str(e)}", extra={"user_id": str(current_user.id)})
+        raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
     
 @router.post("/wallet/debit", response_model=WalletResponse)
 async def debit_money(
@@ -163,12 +160,14 @@ async def debit_money(
     try:
         wallet = await debit_wallet_service(session, current_user.id, data.amount)
 
+        await session.commit()
+
         return WalletResponse(
             wallet_id=wallet.id,
             user_id=wallet.user_id,
             username=current_user.username,
             balance=wallet.balance,
-            created_at=wallet.created_at
+            created_at=wallet.created_at,
         )
 
     except WalletNotFoundError:
@@ -180,8 +179,11 @@ async def debit_money(
     except LockTimeoutError:
         raise HTTPException(status_code=409, detail="Wallet temporarily locked, retry")
 
+    except DeadlockRetryError:
+        raise HTTPException(status_code=409, detail="Transaction retry limit exceeded")
+
     except Exception as e:
-        logger.error(f"Debit failed: {str(e)}")
+        logger.error(f"Debit failed: {str(e)}", extra={"user_id": str(current_user.id)})
         raise HTTPException(status_code=500, detail=TRANSACTION_FAILED)
 
 @router.get("/wallet/balance", response_model=WalletResponse)
@@ -201,7 +203,11 @@ async def get_balance(
         )
 
     except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail="Wallet not found")
+        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+
+    except Exception as e:
+        logger.error(f"Balance fetch failed: {str(e)}", extra={"user_id": str(current_user.id)})
+        raise HTTPException(status_code=500, detail=DATABASE_ERROR)
 
 @router.get("/wallet/ledger", response_model=LedgerResponse)
 async def get_history(
@@ -218,4 +224,8 @@ async def get_history(
         )
 
     except WalletNotFoundError:
-        raise HTTPException(status_code=404, detail="Wallet not found")
+        raise HTTPException(status_code=404, detail=WALLET_NOT_FOUND)
+
+    except Exception as e:
+        logger.error(f"Ledger fetch failed: {str(e)}", extra={"user_id": str(current_user.id)})
+        raise HTTPException(status_code=500, detail=DATABASE_ERROR)
