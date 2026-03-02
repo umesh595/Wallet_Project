@@ -7,7 +7,7 @@ import json
 from decimal import Decimal
 
 BASE_URL = "http://localhost:8000/api/v1"
-TEST_USERNAME = "test_user_jwt"
+TEST_USERNAME = "umesh3"
 TEST_PASSWORD = "SecurePass123!"
 USER_ID = None
 ACCESS_TOKEN = None
@@ -30,7 +30,11 @@ async def login(client: httpx.AsyncClient, username: str, password: str):
     except Exception:
         pass  
     form_data = {"username": username, "password": password}
-    response = await client.post(f"{BASE_URL}/auth/login", data=form_data, timeout=10.0)
+    response = await client.post(
+    f"{BASE_URL}/auth/login",
+    json={"username": username, "password": password},
+    timeout=10.0
+)
     if response.status_code != 200:
         raise Exception(f"Login failed: {response.status_code} - {response.text}")
     token_data = response.json()
