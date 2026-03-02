@@ -1,0 +1,7 @@
+.env
+__pycache__/
+.pytest_cache/
+venv/
+.vscode/
+setup.sql
+setup1.sql
