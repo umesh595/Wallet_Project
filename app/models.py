@@ -29,6 +29,7 @@ class Wallet(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False, index=True)
     balance = Column(Numeric(15, 2), nullable=False, default=0.00)
+    version = Column(Integer, nullable=False, default=0)  # ✅ For optimistic locking
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     user = relationship("User", back_populates="wallet")
